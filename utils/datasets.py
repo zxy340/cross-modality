@@ -484,13 +484,14 @@ class LoadImagesAndLabels(Dataset):
             self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(np.int) * stride
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
-        self.imgs, self.img_npy = [None] * n, [None] * n
+        self.imgs_s, self.imgs_t, self.img_npy = [None] * n, [None] * n, [None] * n
         if cache_images:
             if cache_images == 'disk':
                 self.im_cache_dir = Path(Path(self.img_files[0]).parent.as_posix() + '_npy')
                 self.img_npy = [self.im_cache_dir / Path(f).with_suffix('.npy').name for f in self.img_files]
                 self.im_cache_dir.mkdir(parents=True, exist_ok=True)
-            gb = 0  # Gigabytes of cached images
+            gb_s = 0  # Gigabytes of cached images
+            gb_t = 0  # Gigabytes of cached images
             self.img_hw0, self.img_hw = [None] * n, [None] * n
             results = ThreadPool(NUM_THREADS).imap(lambda x: load_image(*x), zip(repeat(self), range(n)))
             pbar = tqdm(enumerate(results), total=n)
@@ -500,9 +501,11 @@ class LoadImagesAndLabels(Dataset):
                         np.save(self.img_npy[i].as_posix(), x[0])
                     gb += self.img_npy[i].stat().st_size
                 else:
-                    self.imgs[i], self.img_hw0[i], self.img_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
-                    gb += self.imgs[i].nbytes
-                pbar.desc = f'{prefix}Caching images ({gb / 1E9:.1f}GB {cache_images})'
+                    self.imgs_s[i], self.imgs_t[i], self.img_hw0[i], self.img_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
+                    gb_s += self.imgs_s[i].nbytes
+                    gb_t += self.imgs_t[i].nbytes
+                pbar.desc = f'{prefix}Caching images ({gb_s / 1E9:.1f}GB {cache_images})'
+                pbar.desc = f'{prefix}Caching images ({gb_t / 1E9:.1f}GB {cache_images})'
             pbar.close()
 
     def cache_labels(self, path=Path('./labels.cache'), prefix=''):
@@ -557,77 +560,107 @@ class LoadImagesAndLabels(Dataset):
         mosaic = self.mosaic and random.random() < hyp['mosaic']
         if mosaic:
             # Load mosaic
-            img, labels = load_mosaic(self, index)
+            img_s, img_t, labels_s, labels_t = load_mosaic(self, index)
             shapes = None
 
             # MixUp augmentation
             if random.random() < hyp['mixup']:
-                img, labels = mixup(img, labels, *load_mosaic(self, random.randint(0, self.n - 1)))
+                img_s, labels_s = mixup(img_s, labels_s, *load_mosaic(self, random.randint(0, self.n - 1)))
+                img_t, labels_t = mixup(img_t, labels_t, *load_mosaic(self, random.randint(0, self.n - 1)))
 
         else:
             # Load image
-            img, (h0, w0), (h, w) = load_image(self, index)
+            img_s, img_t, (h0, w0), (h, w) = load_image(self, index)
 
             # Letterbox
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
-            img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
+            img_s, ratio, pad = letterbox(img_s, shape, auto=False, scaleup=self.augment)
+            img_t, ratio, pad = letterbox(img_t, shape, auto=False, scaleup=self.augment)
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
-            labels = self.labels[index].copy()
-            if labels.size:  # normalized xywh to pixel xyxy format
-                labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
+            labels_s = self.labels[index].copy()
+            labels_t = self.labels[index].copy()
+            if labels_s.size:  # normalized xywh to pixel xyxy format
+                labels_s[:, 1:] = xywhn2xyxy(labels_s[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
+            if labels_t.size:  # normalized xywh to pixel xyxy format
+                labels_t[:, 1:] = xywhn2xyxy(labels_t[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
             if self.augment:
-                img, labels = random_perspective(img, labels,
+                img_s, labels_s = random_perspective(img_s, labels_s,
+                                                 degrees=hyp['degrees'],
+                                                 translate=hyp['translate'],
+                                                 scale=hyp['scale'],
+                                                 shear=hyp['shear'],
+                                                 perspective=hyp['perspective'])
+                img_t, labels_t = random_perspective(img_t, labels_t,
                                                  degrees=hyp['degrees'],
                                                  translate=hyp['translate'],
                                                  scale=hyp['scale'],
                                                  shear=hyp['shear'],
                                                  perspective=hyp['perspective'])
 
-        nl = len(labels)  # number of labels
-        if nl:
-            labels[:, 1:5] = xyxy2xywhn(labels[:, 1:5], w=img.shape[1], h=img.shape[0], clip=True, eps=1E-3)
+        nl_s = len(labels_s)  # number of labels
+        nl_t = len(labels_t)  # number of labels
+        if nl_s:
+            labels_s[:, 1:5] = xyxy2xywhn(labels_s[:, 1:5], w=img_s.shape[1], h=img_s.shape[0], clip=True, eps=1E-3)
+        if nl_t:
+            labels_t[:, 1:5] = xyxy2xywhn(labels_t[:, 1:5], w=img_t.shape[1], h=img_t.shape[0], clip=True, eps=1E-3)
 
         if self.augment:
             # Albumentations
-            img, labels = self.albumentations(img, labels)
-            nl = len(labels)  # update after albumentations
+            img_s, labels_s = self.albumentations(img_s, labels_s)
+            img_t, labels_t = self.albumentations(img_t, labels_t)
+            nl_s = len(labels_s)  # update after albumentations
+            nl_t = len(labels_t)  # update after albumentations
 
             # HSV color-space
-            augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
+            augment_hsv(img_s, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
+            augment_hsv(img_t, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
 
             # Flip up-down
             if random.random() < hyp['flipud']:
-                img = np.flipud(img)
-                if nl:
-                    labels[:, 2] = 1 - labels[:, 2]
+                img_s = np.flipud(img_s)
+                img_t = np.flipud(img_t)
+                if nl_s:
+                    labels_s[:, 2] = 1 - labels_s[:, 2]
+                if nl_t:
+                    labels_t[:, 2] = 1 - labels_t[:, 2]
 
             # Flip left-right
             if random.random() < hyp['fliplr']:
-                img = np.fliplr(img)
-                if nl:
-                    labels[:, 1] = 1 - labels[:, 1]
+                img_s = np.fliplr(img_s)
+                img_t = np.fliplr(img_t)
+                if nl_s:
+                    labels_s[:, 1] = 1 - labels_s[:, 1]
+                if nl_t:
+                    labels_t[:, 1] = 1 - labels_t[:, 1]
 
             # Cutouts
             # labels = cutout(img, labels, p=0.5)
 
-        labels_out = torch.zeros((nl, 6))
-        if nl:
-            labels_out[:, 1:] = torch.from_numpy(labels)
+        labels_out_s = torch.zeros((nl_s, 6))
+        labels_out_t = torch.zeros((nl_t, 6))
+        if nl_s:
+            labels_out_s[:, 1:] = torch.from_numpy(labels_s)
+        if nl_t:
+            labels_out_t[:, 1:] = torch.from_numpy(labels_t)
 
         # Convert
-        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
-        img = np.ascontiguousarray(img)
+        img_s = img_s.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+        img_s = np.ascontiguousarray(img_s)
+        img_t = img_t.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+        img_t = np.ascontiguousarray(img_t)
 
-        return torch.from_numpy(img), labels_out, self.img_files[index], shapes
+        return torch.from_numpy(img_s), labels_out_s, torch.from_numpy(img_t), labels_out_t, self.img_files[index], shapes
 
     @staticmethod
     def collate_fn(batch):
-        img, label, path, shapes = zip(*batch)  # transposed
-        for i, l in enumerate(label):
+        img_s, label_s, img_t, label_t, path, shapes = zip(*batch)  # transposed
+        for i, l in enumerate(label_s):
             l[:, 0] = i  # add target image index for build_targets()
-        return torch.stack(img, 0), torch.cat(label, 0), path, shapes
+        for i, l in enumerate(label_t):
+            l[:, 0] = i  # add target image index for build_targets()
+        return torch.stack(img_s, 0), torch.cat(label_s, 0), torch.stack(img_t, 0), torch.cat(label_t, 0), path, shapes
 
     @staticmethod
     def collate_fn4(batch):
@@ -659,23 +692,30 @@ class LoadImagesAndLabels(Dataset):
 # Ancillary functions --------------------------------------------------------------------------------------------------
 def load_image(self, i):
     # loads 1 image from dataset index 'i', returns im, original hw, resized hw
-    im = self.imgs[i]
-    if im is None:  # not cached in ram
+    im_s = self.imgs_s[i]
+    im_t = self.imgs_t[i]
+    if im_s is None or im_t is None:  # not cached in ram
         npy = self.img_npy[i]
         if npy and npy.exists():  # load npy
             im = np.load(npy)
+            im_s = im[416:, :, :]
+            im_t = im[:416, :, :]
         else:  # read image
             path = self.img_files[i]
             im = cv2.imread(path)  # BGR
+            im_s = im[416:, :, :]
+            im_t = im[:416, :, :]
             assert im is not None, f'Image Not Found {path}'
-        h0, w0 = im.shape[:2]  # orig hw
+        h0, w0 = im_s.shape[:2]  # orig hw
         r = self.img_size / max(h0, w0)  # ratio
         if r != 1:  # if sizes are not equal
-            im = cv2.resize(im, (int(w0 * r), int(h0 * r)),
+            im_s = cv2.resize(im_s, (int(w0 * r), int(h0 * r)),
                             interpolation=cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR)
-        return im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
+            im_t = cv2.resize(im_t, (int(w0 * r), int(h0 * r)),
+                              interpolation=cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR)
+        return im_s, im_t, (h0, w0), im_s.shape[:2]  # im, hw_original, hw_resized
     else:
-        return self.imgs[i], self.img_hw0[i], self.img_hw[i]  # im, hw_original, hw_resized
+        return self.imgs_s[i], self.imgs_t[i], self.img_hw0[i], self.img_hw[i]  # im, hw_original, hw_resized
 
 
 def load_mosaic(self, index):
@@ -687,11 +727,12 @@ def load_mosaic(self, index):
     random.shuffle(indices)
     for i, index in enumerate(indices):
         # Load image
-        img, _, (h, w) = load_image(self, index)
+        img_s, img_t, _, (h, w) = load_image(self, index)
 
         # place img in img4
         if i == 0:  # top left
-            img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
+            img4_s = np.full((s * 2, s * 2, img_s.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
+            img4_t = np.full((s * 2, s * 2, img_t.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
             x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
             x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
         elif i == 1:  # top right
@@ -704,7 +745,8 @@ def load_mosaic(self, index):
             x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
             x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
 
-        img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
+        img4_s[y1a:y2a, x1a:x2a] = img_s[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
+        img4_t[y1a:y2a, x1a:x2a] = img_t[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
         padw = x1a - x1b
         padh = y1a - y1b
 
@@ -723,16 +765,24 @@ def load_mosaic(self, index):
     # img4, labels4 = replicate(img4, labels4)  # replicate
 
     # Augment
-    img4, labels4, segments4 = copy_paste(img4, labels4, segments4, p=self.hyp['copy_paste'])
-    img4, labels4 = random_perspective(img4, labels4, segments4,
+    img4_s, labels4_s, segments4_s = copy_paste(img4_s, labels4, segments4, p=self.hyp['copy_paste'])
+    img4_t, labels4_t, segments4_t = copy_paste(img4_t, labels4, segments4, p=self.hyp['copy_paste'])
+    img4_s, labels4_s = random_perspective(img4_s, labels4_s, segments4_s,
                                        degrees=self.hyp['degrees'],
                                        translate=self.hyp['translate'],
                                        scale=self.hyp['scale'],
                                        shear=self.hyp['shear'],
                                        perspective=self.hyp['perspective'],
                                        border=self.mosaic_border)  # border to remove
+    img4_t, labels4_t = random_perspective(img4_t, labels4_t, segments4_t,
+                                         degrees=self.hyp['degrees'],
+                                         translate=self.hyp['translate'],
+                                         scale=self.hyp['scale'],
+                                         shear=self.hyp['shear'],
+                                         perspective=self.hyp['perspective'],
+                                         border=self.mosaic_border)  # border to remove
 
-    return img4, labels4
+    return img4_s, img4_t, labels4_s, labels4_t
 
 
 def load_mosaic9(self, index):
