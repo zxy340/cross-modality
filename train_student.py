@@ -479,6 +479,11 @@ def parse_opt(known=False):
     parser.add_argument('--bbox_interval', type=int, default=-1, help='W&B: Set bounding-box image logging interval')
     parser.add_argument('--artifact_alias', type=str, default='latest', help='W&B: Version of dataset artifact to use')
 
+    # Cross-modality arguments
+    parser.add_argument('--path_t', type=str, default='./runs/train/mmKin/weights/best.pt', help='teacher model snapshot')
+    parser.add_argument('--trial', type=str, default='1', help='trial id')
+    parser.add_argument('--dali', type=str, choices=['cpu', 'gpu'], default=None)
+
     opt = parser.parse_known_args()[0] if known else parser.parse_args()
     return opt
 
@@ -517,6 +522,9 @@ def main(opt, callbacks=Callbacks()):
         torch.cuda.set_device(LOCAL_RANK)
         device = torch.device('cuda', LOCAL_RANK)
         dist.init_process_group(backend="nccl" if dist.is_nccl_available() else "gloo")
+
+    # Cross-modality
+    model_t = load_teacher(hyp, opt, device, callbacks)
 
     # Train
     if not opt.evolve:
@@ -620,6 +628,28 @@ def run(**kwargs):
         setattr(opt, k, v)
     main(opt)
 
+def load_teacher(hyp, opt, device, callbacks):
+    save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze, = \
+        Path(opt.save_dir), opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
+        opt.resume, opt.noval, opt.nosave, opt.workers, opt.freeze
+    print('==> loading teacher model')
+    # Model
+    check_suffix(weights, '.pt')  # check weights
+    pretrained = weights.endswith('.pt')
+    if pretrained:
+        with torch_distributed_zero_first(LOCAL_RANK):
+            weights = attempt_download(weights)  # download if not found locally
+        ckpt = torch.load(weights, map_location=device)  # load checkpoint
+        model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+        exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
+        csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
+        csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
+        model.load_state_dict(csd, strict=False)  # load
+        LOGGER.info(f'Transferred {len(csd)}/{len(model.state_dict())} items from {weights}')  # report
+    else:
+        model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+    print('==> done')
+    return model
 
 if __name__ == "__main__":
     opt = parse_opt()

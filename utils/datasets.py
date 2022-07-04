@@ -698,13 +698,13 @@ def load_image(self, i):
         npy = self.img_npy[i]
         if npy and npy.exists():  # load npy
             im = np.load(npy)
-            im_s = im[416:, :, :]
-            im_t = im[:416, :, :]
+            im_t = im[416:, :, :]
+            im_s = im[:416, :, :]
         else:  # read image
             path = self.img_files[i]
             im = cv2.imread(path)  # BGR
-            im_s = im[416:, :, :]
-            im_t = im[:416, :, :]
+            im_t = im[416:, :, :]
+            im_s = im[:416, :, :]
             assert im is not None, f'Image Not Found {path}'
         h0, w0 = im_s.shape[:2]  # orig hw
         r = self.img_size / max(h0, w0)  # ratio
