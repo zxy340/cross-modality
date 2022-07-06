@@ -15,6 +15,10 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 import cv2
+import torch.optim as optim
+from models.util import ConvReg, SelfA, SRRL, SimKD
+from helper.loops import train_distill as train, validate_vanilla, validate_distill
+from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, VIDLoss, SemCKDLoss
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -123,6 +127,16 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
 
+    # .....................Cross-modality teacher model loading.................................
+    ckpt_t = torch.load('teacher.pt', map_location=device)  # load checkpoint
+    model_t = Model(cfg or ckpt_t['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
+    exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
+    csd_t = ckpt_t['model'].float().state_dict()  # checkpoint state_dict as FP32
+    csd_t = intersect_dicts(csd_t, model_t.state_dict(), exclude=exclude)  # intersect
+    model_t.load_state_dict(csd_t, strict=False)  # load
+    LOGGER.info(f'Transferred {len(csd_t)}/{len(model_t.state_dict())} items from {weights}')  # report
+    # ..........................................................................................
+
     # Freeze
     freeze = [f'model.{x}.' for x in range(freeze)]  # layers to freeze
     for k, v in model.named_parameters():
@@ -140,30 +154,64 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         batch_size = check_train_batch_size(model, imgsz)
 
     # Optimizer
+    # nbs = 64  # nominal batch size
+    # accumulate = max(round(nbs / batch_size), 1)  # accumulate loss before optimizing
+    # hyp['weight_decay'] *= batch_size * accumulate / nbs  # scale weight_decay
+    # LOGGER.info(f"Scaled weight_decay = {hyp['weight_decay']}")
+    #
+    # g0, g1, g2 = [], [], []  # optimizer parameter groups
+    # for v in model.modules():
+    #     if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):  # bias
+    #         g2.append(v.bias)
+    #     if isinstance(v, nn.BatchNorm2d):  # weight (no decay)
+    #         g0.append(v.weight)
+    #     elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):  # weight (with decay)
+    #         g1.append(v.weight)
+    #
+    # if opt.adam:
+    #     optimizer = Adam(g0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
+    # else:
+    #     optimizer = SGD(g0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
+    #
+    # optimizer.add_param_group({'params': g1, 'weight_decay': hyp['weight_decay']})  # add g1 with weight_decay
+    # optimizer.add_param_group({'params': g2})  # add g2 (biases)
+    # LOGGER.info(f"{colorstr('optimizer:')} {type(optimizer).__name__} with parameter groups "
+    #             f"{len(g0)} weight, {len(g1)} weight (no decay), {len(g2)} bias")
+    # del g0, g1, g2
+
+    # .................cross-modality parameters.....................
+    ngpus_per_node = torch.cuda.device_count()
+    data = torch.randn(4, 3, 416, 416).cuda()
+    model_t.eval()
+    model.eval()
+    feat_t_raw, _ = model_t(data, is_feat=True)
+    feat_t = []
+    for feat_idx in range(len(feat_t_raw)):
+        if feat_t_raw[feat_idx] != None:
+            feat_t.append(feat_t_raw[feat_idx])
+    feat_s_raw, _ = model(data, is_feat=True)
+    feat_s = []
+    for feat_idx in range(len(feat_s_raw)):
+        if feat_s_raw[feat_idx] != None:
+            feat_s.append(feat_s_raw[feat_idx])
+    trainable_list = nn.ModuleList([])
+    trainable_list.append(model)
+
+    criterion_cls = nn.CrossEntropyLoss()    # classification loss
+    criterion_div = DistillKL(opt.kd_T)    # KL divergence loss, original knowledge distillation
+    s_n = feat_s[-2].shape[1]
+    t_n = feat_t[-2].shape[1]
+    model_simkd = SimKD(s_n=s_n, t_n=t_n, factor=opt.factor).to(device)
+    criterion_kd = nn.MSELoss()     # other knowledge distillation loss
+    trainable_list.append(model_simkd)
+
     nbs = 64  # nominal batch size
-    accumulate = max(round(nbs / batch_size), 1)  # accumulate loss before optimizing
-    hyp['weight_decay'] *= batch_size * accumulate / nbs  # scale weight_decay
-    LOGGER.info(f"Scaled weight_decay = {hyp['weight_decay']}")
-
-    g0, g1, g2 = [], [], []  # optimizer parameter groups
-    for v in model.modules():
-        if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):  # bias
-            g2.append(v.bias)
-        if isinstance(v, nn.BatchNorm2d):  # weight (no decay)
-            g0.append(v.weight)
-        elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):  # weight (with decay)
-            g1.append(v.weight)
-
-    if opt.adam:
-        optimizer = Adam(g0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
-    else:
-        optimizer = SGD(g0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
-
-    optimizer.add_param_group({'params': g1, 'weight_decay': hyp['weight_decay']})  # add g1 with weight_decay
-    optimizer.add_param_group({'params': g2})  # add g2 (biases)
-    LOGGER.info(f"{colorstr('optimizer:')} {type(optimizer).__name__} with parameter groups "
-                f"{len(g0)} weight, {len(g1)} weight (no decay), {len(g2)} bias")
-    del g0, g1, g2
+    # Optimizer
+    optimizer = optim.SGD(trainable_list.parameters(),
+                          lr=opt.learning_rate,
+                          momentum=opt.momentum,
+                          weight_decay=opt.weight_decay)
+    # ..............................................................
 
     # Scheduler
     if opt.linear_lr:
@@ -255,6 +303,29 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     model.names = names
 
+    # .........................Cross-modality.................................
+    compute_loss = ComputeLoss(model)  # init loss class
+    if not opt.skip_validation:
+        # validate teacher accuracy
+        print("==> Teacher model validation...")
+        results, _, _ = val.run(data_dict,
+                                batch_size=batch_size // WORLD_SIZE * 2,
+                                imgsz=imgsz,
+                                model=model_t,
+                                iou_thres=0.60,
+                                single_cls=single_cls,
+                                dataloader=val_loader,
+                                save_dir=save_dir,
+                                save_json=is_coco,
+                                verbose=True,
+                                plots=True,
+                                callbacks=callbacks,
+                                compute_loss=compute_loss)  # val best model with plots
+        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
+    else:
+        print('Skipping teacher validation.')
+    # ...............................................................
+
     # Start training
     t0 = time.time()
     nw = max(round(hyp['warmup_epochs'] * nb), 1000)  # number of warmup iterations, max(3 epochs, 1k iterations)
@@ -271,7 +342,11 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 f"Logging results to {colorstr('bold', save_dir)}\n"
                 f'Starting training for {epochs} epochs...')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+        # set modules as train()
         model.train()
+        model_simkd.train()
+        # set teacher as eval()
+        model_t.eval()
 
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
@@ -291,9 +366,12 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         if RANK in [-1, 0]:
             pbar = tqdm(pbar, total=nb, ncols=NCOLS, bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}')  # progress bar
         optimizer.zero_grad()
+
+        # .......................Cross-modality learning...............................
         for i, (imgs_s, targets_s, imgs_t, targets_t, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs_s = imgs_s.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+            imgs_t = imgs_t.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
             if ni <= nw:
@@ -316,8 +394,26 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
             # Forward
             with amp.autocast(enabled=cuda):
+                feat_s_raw, logit_s = model(imgs_s, is_feat=True)
+                feat_s = []
+                for feat_idx in range(len(feat_s_raw)):
+                    if feat_s_raw[feat_idx] != None:
+                        feat_s.append(feat_s_raw[feat_idx])
+                with torch.no_grad():
+                    feat_t_raw, logit_t = model_t(imgs_t, is_feat=True)
+                    feat_t = []
+                    for feat_idx in range(len(feat_t_raw)):
+                        if feat_t_raw[feat_idx] != None:
+                            feat_t.append(feat_s_raw[feat_idx])
+                    feat_t = [f.detach() for f in feat_t]
+
+                # other kd loss
+                trans_feat_s, trans_feat_t = model_simkd(feat_s[-2], feat_t[-2])
+                loss_kd = criterion_kd(trans_feat_s, trans_feat_t)
+
                 pred = model(imgs_s)  # forward
-                loss, loss_items = compute_loss(pred, targets_s.to(device))  # loss scaled by batch_size
+                loss_cls, loss_items = compute_loss(pred, targets_s.to(device))  # loss scaled by batch_size
+                loss = opt.cls * loss_cls + opt.beta * loss_kd
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -370,7 +466,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             if fi > best_fitness:
                 best_fitness = fi
             log_vals = list(mloss) + list(results) + lr
-            callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
+            # callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
 
             # Save model
             if (not nosave) or (final_epoch and not evolve):  # if save
@@ -431,7 +527,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                     if is_coco:
                         callbacks.run('on_fit_epoch_end', list(mloss) + list(results) + lr, epoch, best_fitness, fi)
 
-        callbacks.run('on_train_end', last, best, plots, epoch, results)
+        # callbacks.run('on_train_end', last, best, plots, epoch, results)
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
 
     torch.cuda.empty_cache()
@@ -480,9 +576,44 @@ def parse_opt(known=False):
     parser.add_argument('--artifact_alias', type=str, default='latest', help='W&B: Version of dataset artifact to use')
 
     # Cross-modality arguments
-    parser.add_argument('--path_t', type=str, default='./runs/train/mmKin/weights/best.pt', help='teacher model snapshot')
+    parser.add_argument('--print_freq', type=int, default=200, help='print frequency')
+    parser.add_argument('--gpu_id', type=str, default='0', help='id(s) for CUDA_VISIBLE_DEVICES')
+    # optimization
+    parser.add_argument('--learning_rate', type=float, default=0.05, help='learning rate')
+    parser.add_argument('--lr_decay_epochs', type=str, default='150,180,210', help='where to decay lr, can be a list')
+    parser.add_argument('--lr_decay_rate', type=float, default=0.1, help='decay rate for learning rate')
+    parser.add_argument('--weight_decay', type=float, default=5e-4, help='weight decay')
+    parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
+    # dataset and model
+    parser.add_argument('--path_t', type=str, default=None, help='teacher model snapshot')
+    # distillation
     parser.add_argument('--trial', type=str, default='1', help='trial id')
+    parser.add_argument('--kd_T', type=float, default=4, help='temperature for KD distillation')
+    parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity', 'vid',                                                              'crd', 'semckd','srrl', 'simkd'])
+    parser.add_argument('-c', '--cls', type=float, default=1.0, help='weight for classification')
+    parser.add_argument('-d', '--div', type=float, default=1.0, help='weight balance for KD')
+    parser.add_argument('-b', '--beta', type=float, default=0.0, help='weight balance for other losses')
+    parser.add_argument('-f', '--factor', type=int, default=2, help='factor size of SimKD')
+    parser.add_argument('-s', '--soft', type=float, default=1.0, help='attention scale of SemCKD')
+    # hint layer
+    parser.add_argument('--hint_layer', default=1, type=int, choices=[0, 1, 2, 3, 4])
+    # NCE distillation
+    parser.add_argument('--feat_dim', default=128, type=int, help='feature dimension')
+    parser.add_argument('--mode', default='exact', type=str, choices=['exact', 'relax'])
+    parser.add_argument('--nce_k', default=16384, type=int, help='number of negative samples for NCE')
+    parser.add_argument('--nce_t', default=0.07, type=float, help='temperature parameter for softmax')
+    parser.add_argument('--nce_m', default=0.5, type=float, help='momentum for non-parametric updates')
+    # multiprocessing
     parser.add_argument('--dali', type=str, choices=['cpu', 'gpu'], default=None)
+    parser.add_argument('--multiprocessing-distributed', action='store_true',
+                    help='Use multi-processing distributed training to launch '
+                         'N processes per node, which has N GPUs. This is the '
+                         'fastest way to use PyTorch for either single node or '
+                         'multi node data parallel training')
+    parser.add_argument('--dist-url', default='tcp://127.0.0.1:23451', type=str,
+                    help='url used to set up distributed training')
+    parser.add_argument('--deterministic', action='store_true', help='Make results reproducible')
+    parser.add_argument('--skip-validation', action='store_true', help='Skip validation of teacher')
 
     opt = parser.parse_known_args()[0] if known else parser.parse_args()
     return opt
@@ -523,8 +654,6 @@ def main(opt, callbacks=Callbacks()):
         device = torch.device('cuda', LOCAL_RANK)
         dist.init_process_group(backend="nccl" if dist.is_nccl_available() else "gloo")
 
-    # Cross-modality
-    model_t = load_teacher(hyp, opt, device, callbacks)
 
     # Train
     if not opt.evolve:
@@ -627,29 +756,6 @@ def run(**kwargs):
     for k, v in kwargs.items():
         setattr(opt, k, v)
     main(opt)
-
-def load_teacher(hyp, opt, device, callbacks):
-    save_dir, epochs, batch_size, weights, single_cls, evolve, data, cfg, resume, noval, nosave, workers, freeze, = \
-        Path(opt.save_dir), opt.epochs, opt.batch_size, opt.weights, opt.single_cls, opt.evolve, opt.data, opt.cfg, \
-        opt.resume, opt.noval, opt.nosave, opt.workers, opt.freeze
-    print('==> loading teacher model')
-    # Model
-    check_suffix(weights, '.pt')  # check weights
-    pretrained = weights.endswith('.pt')
-    if pretrained:
-        with torch_distributed_zero_first(LOCAL_RANK):
-            weights = attempt_download(weights)  # download if not found locally
-        ckpt = torch.load(weights, map_location=device)  # load checkpoint
-        model = Model(cfg or ckpt['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-        exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
-        csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
-        csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
-        model.load_state_dict(csd, strict=False)  # load
-        LOGGER.info(f'Transferred {len(csd)}/{len(model.state_dict())} items from {weights}')  # report
-    else:
-        model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-    print('==> done')
-    return model
 
 if __name__ == "__main__":
     opt = parse_opt()

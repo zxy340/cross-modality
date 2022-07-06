@@ -1,6 +1,6 @@
 from __future__ import print_function, division
 from cProfile import label
-
+import numpy as np
 import sys
 import time
 import torch
@@ -198,19 +198,18 @@ def validate_vanilla(val_loader, model, criterion, opt):
     with torch.no_grad():
         end = time.time()
         for idx, batch_data in enumerate(val_loader):
-            
-            if opt.dali is None:
-                images, labels = batch_data
-            else:
-                images, labels = batch_data[0]['data'], batch_data[0]['label'].squeeze().long()
 
-            if opt.gpu is not None:
-                images = images.cuda(opt.gpu if opt.multiprocessing_distributed else 0, non_blocking=True)
+            if opt.dali is None:
+                _, _, images, labels, _, _ = batch_data
+            else:
+                _, _, images, labels, _, _ = batch_data[0]['data'], batch_data[0]['label'].squeeze().long()
+
+            images = images.cuda(non_blocking=True)
             if torch.cuda.is_available():
-                labels = labels.cuda(opt.gpu if opt.multiprocessing_distributed else 0, non_blocking=True)
+                labels = labels.cuda(non_blocking=True)
 
             # compute output
-            output = model(images)
+            output = model(images.float())
             loss = criterion(output, labels)
             losses.update(loss.item(), images.size(0))
 
