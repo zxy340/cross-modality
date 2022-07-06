@@ -1,0 +1,21 @@
+# YOLOv3 🚀 by Ultralytics, GPL-3.0 license
+# Example usage: python train.py --data kinect.yaml
+# parent
+# ├── yolov3
+# └── datasets
+#     └── mmWave  ← downloads here
+
+
+# Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
+path: ../datasets/mmWave  # dataset root dir
+train: images  # train images (relative to 'path') 9676 images
+val: images  # val images (relative to 'path') 9676 images
+test:  # test images (optional)
+
+# Classes
+nc: 1  # number of classes
+names: ['hand']  # class names
+
+
+# Download script/URL (optional)
+download: None
