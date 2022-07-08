@@ -197,8 +197,6 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     trainable_list = nn.ModuleList([])
     trainable_list.append(model)
 
-    criterion_cls = nn.CrossEntropyLoss()    # classification loss
-    criterion_div = DistillKL(opt.kd_T)    # KL divergence loss, original knowledge distillation
     s_n = feat_s[-2].shape[1]
     t_n = feat_t[-2].shape[1]
     model_simkd = SimKD(s_n=s_n, t_n=t_n, factor=opt.factor).to(device)
@@ -304,26 +302,26 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     model.names = names
 
     # .........................Cross-modality.................................
-    compute_loss = ComputeLoss(model)  # init loss class
-    if not opt.skip_validation:
-        # validate teacher accuracy
-        print("==> Teacher model validation...")
-        results, _, _ = val.run(data_dict,
-                                batch_size=batch_size // WORLD_SIZE * 2,
-                                imgsz=imgsz,
-                                model=model_t,
-                                iou_thres=0.60,
-                                single_cls=single_cls,
-                                dataloader=val_loader,
-                                save_dir=save_dir,
-                                save_json=is_coco,
-                                verbose=True,
-                                plots=True,
-                                callbacks=callbacks,
-                                compute_loss=compute_loss)  # val best model with plots
-        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
-    else:
-        print('Skipping teacher validation.')
+    # compute_loss = ComputeLoss(model)  # init loss class
+    # if not opt.skip_validation:
+    #     # validate teacher accuracy
+    #     print("==> Teacher model validation...")
+    #     results, _, _ = val.run(data_dict,
+    #                             batch_size=batch_size // WORLD_SIZE * 2,
+    #                             imgsz=imgsz,
+    #                             model=model_t,
+    #                             iou_thres=0.60,
+    #                             single_cls=single_cls,
+    #                             dataloader=val_loader,
+    #                             save_dir=save_dir,
+    #                             save_json=is_coco,
+    #                             verbose=True,
+    #                             plots=True,
+    #                             callbacks=callbacks,
+    #                             compute_loss=compute_loss)  # val best model with plots
+    #     LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
+    # else:
+    #     print('Skipping teacher validation.')
     # ...............................................................
 
     # Start training
@@ -466,7 +464,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             if fi > best_fitness:
                 best_fitness = fi
             log_vals = list(mloss) + list(results) + lr
-            # callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
+            callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
 
             # Save model
             if (not nosave) or (final_epoch and not evolve):  # if save
@@ -527,7 +525,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                     if is_coco:
                         callbacks.run('on_fit_epoch_end', list(mloss) + list(results) + lr, epoch, best_fitness, fi)
 
-        # callbacks.run('on_train_end', last, best, plots, epoch, results)
+        callbacks.run('on_train_end', last, best, plots, epoch, results)
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
 
     torch.cuda.empty_cache()
