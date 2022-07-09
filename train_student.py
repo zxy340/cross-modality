@@ -17,8 +17,6 @@ from pathlib import Path
 import cv2
 import torch.optim as optim
 from models.util import ConvReg, SelfA, SRRL, SimKD
-from helper.loops import train_distill as train, validate_vanilla, validate_distill
-from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, VIDLoss, SemCKDLoss
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -28,6 +26,8 @@ from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import SGD, Adam, lr_scheduler
 from tqdm import tqdm
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # root directory
@@ -302,26 +302,26 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     model.names = names
 
     # .........................Cross-modality.................................
-    # compute_loss = ComputeLoss(model)  # init loss class
-    # if not opt.skip_validation:
-    #     # validate teacher accuracy
-    #     print("==> Teacher model validation...")
-    #     results, _, _ = val.run(data_dict,
-    #                             batch_size=batch_size // WORLD_SIZE * 2,
-    #                             imgsz=imgsz,
-    #                             model=model_t,
-    #                             iou_thres=0.60,
-    #                             single_cls=single_cls,
-    #                             dataloader=val_loader,
-    #                             save_dir=save_dir,
-    #                             save_json=is_coco,
-    #                             verbose=True,
-    #                             plots=True,
-    #                             callbacks=callbacks,
-    #                             compute_loss=compute_loss)  # val best model with plots
-    #     LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
-    # else:
-    #     print('Skipping teacher validation.')
+    compute_loss = ComputeLoss(model)  # init loss class
+    if not opt.skip_validation:
+        # validate teacher accuracy
+        print("==> Teacher model validation...")
+        results, _, _ = val.run(data_dict,
+                                batch_size=batch_size // WORLD_SIZE * 2,
+                                imgsz=imgsz,
+                                model=model_t,
+                                iou_thres=0.60,
+                                single_cls=single_cls,
+                                dataloader=val_loader,
+                                save_dir=save_dir,
+                                save_json=is_coco,
+                                verbose=True,
+                                plots=True,
+                                callbacks=callbacks,
+                                compute_loss=compute_loss)  # val best model with plots
+        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
+    else:
+        print('Skipping teacher validation.')
     # ...............................................................
 
     # Start training
@@ -411,6 +411,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
                 pred = model(imgs_s)  # forward
                 loss_cls, loss_items = compute_loss(pred, targets_s.to(device))  # loss scaled by batch_size
+                if i % 50 == 0:
+                  print('The {}th batch loss_cls and loss_kd are {} and {}, repectively'.format(i, loss_cls, loss_kd))
                 loss = opt.cls * loss_cls + opt.beta * loss_kd
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
@@ -575,7 +577,6 @@ def parse_opt(known=False):
 
     # Cross-modality arguments
     parser.add_argument('--print_freq', type=int, default=200, help='print frequency')
-    parser.add_argument('--gpu_id', type=str, default='0', help='id(s) for CUDA_VISIBLE_DEVICES')
     # optimization
     parser.add_argument('--learning_rate', type=float, default=0.05, help='learning rate')
     parser.add_argument('--lr_decay_epochs', type=str, default='150,180,210', help='where to decay lr, can be a list')
@@ -589,7 +590,6 @@ def parse_opt(known=False):
     parser.add_argument('--kd_T', type=float, default=4, help='temperature for KD distillation')
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity', 'vid',                                                              'crd', 'semckd','srrl', 'simkd'])
     parser.add_argument('-c', '--cls', type=float, default=1.0, help='weight for classification')
-    parser.add_argument('-d', '--div', type=float, default=1.0, help='weight balance for KD')
     parser.add_argument('-b', '--beta', type=float, default=0.0, help='weight balance for other losses')
     parser.add_argument('-f', '--factor', type=int, default=2, help='factor size of SimKD')
     parser.add_argument('-s', '--soft', type=float, default=1.0, help='attention scale of SemCKD')
