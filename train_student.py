@@ -197,11 +197,14 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     trainable_list = nn.ModuleList([])
     trainable_list.append(model)
 
-    s_n = feat_s[-2].shape[1]
-    t_n = feat_t[-2].shape[1]
-    model_simkd = SimKD(s_n=s_n, t_n=t_n, factor=opt.factor).to(device)
-    criterion_kd = nn.MSELoss()     # other knowledge distillation loss
+    model_simkd = nn.ModuleList([])
+    for feat_idx in range(len(feat_s)):
+        s_n = feat_s[feat_idx].shape[1]
+        t_n = feat_t[feat_idx].shape[1]
+        model_simkd.append(SimKD(s_n=s_n, t_n=t_n, factor=opt.factor))
+    model_simkd = model_simkd.to(device)
     trainable_list.append(model_simkd)
+    criterion_kd = nn.MSELoss()  # other knowledge distillation loss
 
     nbs = 64  # nominal batch size
     # Optimizer
@@ -406,8 +409,10 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                     feat_t = [f.detach() for f in feat_t]
 
                 # other kd loss
-                trans_feat_s, trans_feat_t = model_simkd(feat_s[-2], feat_t[-2])
-                loss_kd = criterion_kd(trans_feat_s, trans_feat_t)
+                loss_kd = 0
+                for feat_idx in range(len(feat_s)):
+                    trans_feat_s, trans_feat_t = model_simkd[feat_idx](feat_s[feat_idx], feat_t[feat_idx])
+                    loss_kd = loss_kd + criterion_kd(trans_feat_s, trans_feat_t)
 
                 pred = model(imgs_s)  # forward
                 loss_cls, loss_items = compute_loss(pred, targets_s.to(device))  # loss scaled by batch_size
