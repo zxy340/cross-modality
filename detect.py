@@ -100,7 +100,9 @@ def run(weights=ROOT / 'yolov3.pt',  # model.pt path(s)
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
     dt, seen = [0.0, 0.0, 0.0], 0
+    count, total = 0, 0
     for path, im, im0s, vid_cap, s in dataset:
+        total = total + 1  # record the image number of the dataset
         t1 = time_sync()
         im = torch.from_numpy(im).to(device)
         im = im.half() if half else im.float()  # uint8 to fp16/32
@@ -140,6 +142,7 @@ def run(weights=ROOT / 'yolov3.pt',  # model.pt path(s)
             imc = im0.copy() if save_crop else im0  # for save_crop
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
             if len(det):
+                count = count + 1  # record the number of detected images
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
 
@@ -175,7 +178,8 @@ def run(weights=ROOT / 'yolov3.pt',  # model.pt path(s)
             # Save results (image with detections)
             if save_img:
                 if dataset.mode == 'image':
-                    cv2.imwrite(save_path, im0)
+                    if len(det):
+                        cv2.imwrite(save_path, im0)
                 else:  # 'video' or 'stream'
                     if vid_path[i] != save_path:  # new video
                         vid_path[i] = save_path
@@ -192,6 +196,7 @@ def run(weights=ROOT / 'yolov3.pt',  # model.pt path(s)
                     vid_writer[i].write(im0)
 
     # Print results
+    LOGGER.info(f'{count} detected, {total} total')
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS per image at shape {(1, 3, *imgsz)}' % t)
     if save_txt or save_img:

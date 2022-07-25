@@ -227,9 +227,5 @@ class SimKD(nn.Module):
         
         # Channel Alignment
         trans_feat_s = getattr(self, 'transfer')(source)
-
-        # Prediction via Teacher Classifier
-        temp_feat = self.avg_pool(trans_feat_s)
-        temp_feat = temp_feat.view(temp_feat.size(0), -1)
         
         return trans_feat_s, trans_feat_t

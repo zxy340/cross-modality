@@ -128,7 +128,9 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
 
     # .....................Cross-modality teacher model loading.................................
-    ckpt_t = torch.load('teacher.pt', map_location=device)  # load checkpoint
+    teacher_path = './runs/train/Kinect_yolov3-tiny/weights/best.pt'
+    LOGGER.info(f'Load the teacher model from {teacher_path}')
+    ckpt_t = torch.load(teacher_path, map_location=device)  # load checkpoint
     model_t = Model(cfg or ckpt_t['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
     exclude = ['anchor'] if (cfg or hyp.get('anchors')) and not resume else []  # exclude keys
     csd_t = ckpt_t['model'].float().state_dict()  # checkpoint state_dict as FP32
@@ -136,14 +138,6 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     model_t.load_state_dict(csd_t, strict=False)  # load
     LOGGER.info(f'Transferred {len(csd_t)}/{len(model_t.state_dict())} items from {weights}')  # report
     # ..........................................................................................
-
-    # Freeze
-    freeze = [f'model.{x}.' for x in range(freeze)]  # layers to freeze
-    for k, v in model.named_parameters():
-        v.requires_grad = True  # train all layers
-        if any(x in k for x in freeze):
-            LOGGER.info(f'freezing {k}')
-            v.requires_grad = False
 
     # Image size
     gs = max(int(model.stride.max()), 32)  # grid size (max stride)
@@ -191,17 +185,26 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             feat_t.append(feat_t_raw[feat_idx])
     feat_s_raw, _ = model(data, is_feat=True)
     feat_s = []
+    crosslist_s = [-1]
     for feat_idx in range(len(feat_s_raw)):
         if feat_s_raw[feat_idx] != None:
             feat_s.append(feat_s_raw[feat_idx])
+            crosslist_s.append(feat_idx)
+    crosslist_s.append(len(feat_s_raw))
     trainable_list = nn.ModuleList([])
     trainable_list.append(model)
 
     model_simkd = nn.ModuleList([])
-    for feat_idx in range(len(feat_s)):
-        s_n = feat_s[feat_idx].shape[1]
-        t_n = feat_t[feat_idx].shape[1]
-        model_simkd.append(SimKD(s_n=s_n, t_n=t_n, factor=opt.factor))
+    if not freeze:
+        for feat_idx in range(len(feat_s)):
+            s_n = feat_s[feat_idx].shape[1]
+            t_n = feat_t[feat_idx].shape[1]
+            model_simkd.append(SimKD(s_n=s_n, t_n=t_n, factor=opt.factor))
+    else:
+        if freeze <= len(feat_s):
+            s_n = feat_s[freeze - 1].shape[1]
+            t_n = feat_t[freeze - 1].shape[1]
+            model_simkd.append(SimKD(s_n=s_n, t_n=t_n, factor=opt.factor))
     model_simkd = model_simkd.to(device)
     trainable_list.append(model_simkd)
     criterion_kd = nn.MSELoss()  # other knowledge distillation loss
@@ -260,7 +263,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
     # Trainloader
     train_loader, dataset = create_dataloader(train_path, imgsz, batch_size // WORLD_SIZE, gs, single_cls,
-                                              hyp=hyp, augment=True, cache=opt.cache, rect=opt.rect, rank=LOCAL_RANK,
+                                              hyp=hyp, augment=False, cache=opt.cache, rect=opt.rect, rank=LOCAL_RANK,
                                               workers=workers, image_weights=opt.image_weights, quad=opt.quad,
                                               prefix=colorstr('train: '), shuffle=True)
     mlc = int(np.concatenate(dataset.labels, 0)[:, 0].max())  # max label class
@@ -303,7 +306,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
     model.hyp = hyp  # attach hyperparameters to model
     model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     model.names = names
-
+   
     # .........................Cross-modality.................................
     compute_loss = ComputeLoss(model)  # init loss class
     if not opt.skip_validation:
@@ -321,7 +324,8 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                                 verbose=True,
                                 plots=True,
                                 callbacks=callbacks,
-                                compute_loss=compute_loss)  # val best model with plots
+                                compute_loss=compute_loss,
+                                val_t=True)  # val best model with plots
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
     else:
         print('Skipping teacher validation.')
@@ -349,6 +353,15 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         # set teacher as eval()
         model_t.eval()
 
+        # Freeze
+        if freeze:
+            freeze_idx = [f'model.{x}.' for x in range(crosslist_s[freeze - 1] + 1, crosslist_s[freeze] + 1)]  # layers to train
+            for k, v in model.named_parameters():
+                v.requires_grad = False  # train all layers
+                if any(x in k for x in freeze_idx):
+                    LOGGER.info(f'training {k}')
+                    v.requires_grad = True
+
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
             cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
@@ -371,6 +384,24 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         # .......................Cross-modality learning...............................
         for i, (imgs_s, targets_s, imgs_t, targets_t, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
+            # stu = np.transpose(imgs_s[0], (1, 2, 0)).cpu().numpy()
+            # xmin = int((targets_s[0][2] - targets_s[0][4] / 2) * 416)
+            # ymin = int((targets_s[0][3] - targets_s[0][5] / 2) * 416)
+            # xmax = int((targets_s[0][2] + targets_s[0][4] / 2) * 416)
+            # ymax = int((targets_s[0][3] + targets_s[0][5] / 2) * 416)
+            # cv2.imwrite('stu.jpg', stu)
+            # stu = cv2.imread('stu.jpg')
+            # cv2.rectangle(stu, (xmin, ymin), (xmax, ymax), (0, 0, 255))
+            # tea = np.transpose(imgs_t[0], (1, 2, 0)).cpu().numpy()
+            # xmin = int((targets_t[0][2] - targets_t[0][4] / 2) * 416)
+            # ymin = int((targets_t[0][3] - targets_t[0][5] / 2) * 416)
+            # xmax = int((targets_t[0][2] + targets_t[0][4] / 2) * 416)
+            # ymax = int((targets_t[0][3] + targets_t[0][5] / 2) * 416)
+            # cv2.imwrite('tea.jpg', tea)
+            # tea = cv2.imread('tea.jpg')
+            # cv2.rectangle(tea, (xmin, ymin), (xmax, ymax), (0, 0, 255))
+            # cv2.imwrite('./results/mmWave' + str(i) + '.jpg', stu)
+            # cv2.imwrite('./results/depth' + str(i) + '.jpg', tea)
             imgs_s = imgs_s.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
             imgs_t = imgs_t.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
 
@@ -405,19 +436,24 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                     feat_t = []
                     for feat_idx in range(len(feat_t_raw)):
                         if feat_t_raw[feat_idx] != None:
-                            feat_t.append(feat_s_raw[feat_idx])
+                            feat_t.append(feat_t_raw[feat_idx])
                     feat_t = [f.detach() for f in feat_t]
 
                 # other kd loss
                 loss_kd = 0
-                for feat_idx in range(len(feat_s)):
-                    trans_feat_s, trans_feat_t = model_simkd[feat_idx](feat_s[feat_idx], feat_t[feat_idx])
-                    loss_kd = loss_kd + criterion_kd(trans_feat_s, trans_feat_t)
+                if len(model_simkd):
+                    if not freeze:
+                        for feat_idx in range(len(model_simkd)):
+                            trans_feat_s, trans_feat_t = model_simkd[feat_idx](feat_s[feat_idx], feat_t[feat_idx])
+                            loss_kd = loss_kd + criterion_kd(trans_feat_s, trans_feat_t)
+                    else:
+                        trans_feat_s, trans_feat_t = model_simkd[0](feat_s[freeze - 1], feat_t[freeze - 1])
+                        loss_kd = loss_kd + criterion_kd(trans_feat_s, trans_feat_t)
 
                 pred = model(imgs_s)  # forward
                 loss_cls, loss_items = compute_loss(pred, targets_s.to(device))  # loss scaled by batch_size
-                if i % 50 == 0:
-                  print('The {}th batch loss_cls and loss_kd are {} and {}, repectively'.format(i, loss_cls, loss_kd))
+                if i % 100 == 0:
+                    LOGGER.info(f'The {i}th batch loss_cls and loss_kd are {loss_cls} and {loss_kd}, repectively')
                 loss = opt.cls * loss_cls + opt.beta * loss_kd
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode

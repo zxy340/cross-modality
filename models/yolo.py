@@ -305,6 +305,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         if i == 0:
             ch = []
         ch.append(c2)
+    save = [0, 2, 4, 6, 8, 10, 13, 14, 15]  # DIY output which layer's feature map
     return nn.Sequential(*layers), sorted(save)
 
 

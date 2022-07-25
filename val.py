@@ -107,6 +107,7 @@ def run(data,
         plots=True,
         callbacks=Callbacks(),
         compute_loss=None,
+        val_t=False,  # default student model validation
         ):
     # Initialize/load model and set device
     training = model is not None
@@ -164,6 +165,9 @@ def run(data,
     jdict, stats, ap, ap_class = [], [], [], []
     pbar = tqdm(dataloader, desc=s, ncols=NCOLS, bar_format='{l_bar}{bar:10}{r_bar}{bar:-10b}')  # progress bar
     for batch_i, (im_s, targets_s, im_t, targets_t, paths, shapes) in enumerate(pbar):
+        if val_t:
+            im_s = im_t
+            targets_s = targets_t
         t1 = time_sync()
         if pt:
             im_s = im_s.to(device, non_blocking=True)
