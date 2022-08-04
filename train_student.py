@@ -128,7 +128,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
 
     # .....................Cross-modality teacher model loading.................................
-    teacher_path = './runs/train/Kinect_yolov3-tiny/weights/best.pt'
+    teacher_path = './runs/train/sig_Kinect_yolov3-tiny/weights/best.pt'
     LOGGER.info(f'Load the teacher model from {teacher_path}')
     ckpt_t = torch.load(teacher_path, map_location=device)  # load checkpoint
     model_t = Model(cfg or ckpt_t['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
