@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+from hashlib import new
 import os
 import sys
 from pathlib import Path
@@ -40,7 +41,7 @@ from utils.torch_utils import select_device, time_sync
 
 @torch.no_grad()
 def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  # model.pt path(s)
-        source=ROOT / '../hand/hand/data/realtime/',  # file/dir/URL/glob, 0 for webcam
+        source='../hand/hand/data/realtime/',  # file/dir/URL/glob, 0 for webcam
         imgsz=640,  # inference size (pixels)
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
@@ -119,11 +120,18 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
 
                 # Stream results
                 im0 = annotator.result()
-                old_mtime = np.loadtxt(source + 'timestamp.txt', dtype=str)
+                # old_mtime = np.genfromtxt(source + 'timestamp.txt', dtype=str)
+                f = open(source + 'timestamp.txt')
+                old_mtime = f.readline()
+                f.close()
                 while(1):
                     cv2.imshow(str(p), im0)
-                    cv2.waitKey(10)  # 1 millisecond
-                    if np.loadtxt(source + 'timestamp.txt', dtype=str) != old_mtime:
+                    cv2.waitKey(1)  # 1 millisecond
+                    # new_mtime = np.genfromtxt(source + 'timestamp.txt', dtype=str)
+                    f = open(source + 'timestamp.txt')
+                    new_mtime = f.readline()
+                    f.close()
+                    if new_mtime != old_mtime:
                         break
         t2 = time_sync()
         LOGGER.info(f'Done. ({t2 - t1:.3f}s)')
