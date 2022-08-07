@@ -40,7 +40,7 @@ from utils.torch_utils import select_device, time_sync
 
 @torch.no_grad()
 def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  # model.pt path(s)
-        source=ROOT / '../hand/hand/data/realtime/Depdata.txt',  # file/dir/URL/glob, 0 for webcam
+        source=ROOT / '../hand/hand/data/realtime/',  # file/dir/URL/glob, 0 for webcam
         imgsz=640,  # inference size (pixels)
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
@@ -67,7 +67,7 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
         t1 = time_sync()
         # Dataloader
         typ = np.dtype((np.uint16, (424, 512)))
-        Depth_data = np.fromfile(source, dtype=typ)
+        Depth_data = np.fromfile(source + 'Depdata.txt', dtype=typ)
         Depth_data = Depth_data.squeeze()
         max_value = Depth_data.max()
         Depth_data = Depth_data / max_value * 255
@@ -119,11 +119,11 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
 
                 # Stream results
                 im0 = annotator.result()
-                old_mtime = time.ctime(os.path.getmtime(source))
+                old_mtime = np.loadtxt(source + 'timestamp.txt', dtype=str)
                 while(1):
                     cv2.imshow(str(p), im0)
                     cv2.waitKey(10)  # 1 millisecond
-                    if time.ctime(os.path.getmtime(source)) != old_mtime:
+                    if np.loadtxt(source + 'timestamp.txt', dtype=str) != old_mtime:
                         break
         t2 = time_sync()
         LOGGER.info(f'Done. ({t2 - t1:.3f}s)')
