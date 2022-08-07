@@ -92,7 +92,7 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
 
             # NMS
             pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
-            pred[0] = pred[0][torch.arange(pred[0].size())==0]
+            pred[0] = pred[0][torch.arange(pred[0].size(0))==0]
             # Process predictions
             for i, det in enumerate(pred):  # per image
                 seen += 1
