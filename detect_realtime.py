@@ -41,9 +41,9 @@ from utils.torch_utils import select_device, time_sync
 
 
 @torch.no_grad()
-def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  # model.pt path(s)
+def run(weights=ROOT / './runs/train/new_Cross1-0_yolov3-tiny/weights/best.pt',  # model.pt path(s)
         source='../hand/hand/data/realtime/',  # file/dir/URL/glob, 0 for webcam
-        imgsz=640,  # inference size (pixels)
+        imgsz=416,  # inference size (pixels)
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image
@@ -61,8 +61,8 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
 
     # Load model
     device = select_device(device)
-    model_t = DetectMultiBackend(weights, device=device, dnn=dnn)
-    stride, names, pt, jit, onnx = model_t.stride, model_t.names, model_t.pt, model_t.jit, model_t.onnx
+    model = DetectMultiBackend(weights, device=device, dnn=dnn)
+    stride, names, pt, jit, onnx = model.stride, model.names, model.pt, model.jit, model.onnx
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Open a thread for mmWave
@@ -71,9 +71,6 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
 
     while True:
         t1 = time_sync()
-        # mmWave Dataloader
-        readItem, itemNum, lostPacketFlag = a.getFrame()
-        mm_image = process(readItem)
         # Kinect Dataloader
         typ = np.dtype((np.uint16, (424, 512)))
         Depth_image = np.fromfile(source + 'Depdata.txt', dtype=typ)
@@ -81,19 +78,20 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
         max_value = Depth_image.max()
         Depth_image = Depth_image / max_value * 255
         Depth_image = cv2.resize(Depth_image, (416, 416))
-        # Cat image
-        image = np.concatenate((Depth_image, mm_image), axis=0)
-        name = './realtime/image.jpg'
-        cv2.imwrite(name, image)
+        # mmWave Dataloader
+        readItem, itemNum, lostPacketFlag = a.getFrame()
+        if len(readItem) == 14:
+            continue
+        mm_image = process(readItem)
+        name = './realtime/mm_image.jpg'
+        cv2.imwrite(name, mm_image)
         dataset = LoadImages(name, img_size=imgsz, stride=stride, auto=pt and not jit)
 
         # Run inference
         if pt and device.type != 'cpu':
-            model_t(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model_t.model.parameters())))  # warmup
+            model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
         seen, count =0, 0
         for path, im, im0s, vid_cap, s in dataset:
-            cv2.imwrite('./realtime/im.jpg', im)
-            cv2.imwrite('./realtime/im0s.jpg', im0s)
             im = torch.from_numpy(im).to(device)
             im = im.half() if half else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
@@ -101,13 +99,13 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
                 im = im[None]  # expand for batch dim
 
             # Inference
-            pred_t = model_t(im, augment=augment, visualize=visualize)
+            pred = model(im, augment=augment, visualize=visualize)
 
             # NMS
-            pred_t = non_max_suppression(pred_t, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
-            pred_t[0] = pred_t[0][torch.arange(pred_t[0].size(0))==0]
+            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            pred[0] = pred[0][torch.arange(pred[0].size(0))==0]
             # Process predictions
-            for i, det in enumerate(pred_t):  # per image
+            for i, det in enumerate(pred):  # per image
                 seen += 1
                 p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
@@ -132,6 +130,7 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
 
                 # Stream results
                 im0 = annotator.result()
+                im0 = np.concatenate((Depth_image, im0), axis=0)
                 # old_mtime = np.genfromtxt(source + 'timestamp.txt', dtype=str)
                 f = open(source + 'timestamp.txt')
                 old_mtime = f.readline()

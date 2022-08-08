@@ -69,11 +69,12 @@ def angleFFT(AOAInput, padding_azimuth, padding_elevation, numRxAntennas):
     return x_vector, y_vector, z_vector
 
 def process(readItem):
+    readItem = np.uint16(readItem)
     readItem = readItem.reshape(chirp_num, Txchannel_num, Rxchannel_num, -1, 4)  # 2I + 2Q = 4
-    x_I = readItem[:, :, :, :, :, :2].reshape(chirp_num, Txchannel_num, Rxchannel_num, -1)  # flatten the last two dims of I data
-    x_Q = readItem[:, :, :, :, :, 2:].reshape(chirp_num, Txchannel_num, Rxchannel_num, -1)  # flatten the last two dims of Q data
-    data = np.array((x_I, x_Q))  # data[I/Q, Frame, Chirp, TxChannel, RxChannel, Sample]
-    data = np.transpose(data, (0, 3, 4, 1, 2, 5))  # data[I/Q, TxChannel, RxChannel, Frame, Chirp, Sample]
+    x_I = readItem[:, :, :, :, :2].reshape(chirp_num, Txchannel_num, Rxchannel_num, -1)  # flatten the last two dims of I data
+    x_Q = readItem[:, :, :, :, 2:].reshape(chirp_num, Txchannel_num, Rxchannel_num, -1)  # flatten the last two dims of Q data
+    data = np.array((x_I, x_Q))  # data[I/Q, Chirp, TxChannel, RxChannel, Sample]
+    data = np.transpose(data, (0, 2, 3, 1, 4))  # data[I/Q, TxChannel, RxChannel, Chirp, Sample]
     sigReceive = np.zeros((Txchannel_num, Rxchannel_num, chirp_num, sample_num), dtype=complex)
     for Txchannel in range(Txchannel_num):
         for Rxchannel in range(Rxchannel_num):
@@ -82,7 +83,7 @@ def process(readItem):
                     sigReceive[Txchannel, Rxchannel, chirp, sample] = complex(0, 1) * data[
                         0, Txchannel, Rxchannel, chirp, sample] + data[1, Txchannel, Rxchannel, chirp, sample]
     frameWithChirp = np.reshape(sigReceive, (Txchannel_num, Rxchannel_num, chirp_num, -1))
-    frameWithChirp = np.flip(frameWithChirp, 4)
+    frameWithChirp = np.flip(frameWithChirp, 3)
     # get 1D range profile->rangeFFT
     rangeFFTResult = rangeFFT(frameWithChirp, sample_num)
     rangeFFTResult = clutter_removal(rangeFFTResult, axis=2)
