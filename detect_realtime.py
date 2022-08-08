@@ -15,11 +15,11 @@ Usage:
 import argparse
 from hashlib import new
 import os
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
 import sys
 from pathlib import Path
 import numpy as np
-import multiprocessing
-import time
+import matplotlib.pyplot as plt
 from mm_process import process
 from steaming import adcCapThread
 import cv2
@@ -75,11 +75,16 @@ def run(weights=ROOT / './runs/train/new_Cross1-0_yolov3-tiny/weights/best.pt', 
         typ = np.dtype((np.uint16, (424, 512)))
         Depth_image = np.fromfile(source + 'Depdata.txt', dtype=typ)
         Depth_image = Depth_image.squeeze()
+        if len(Depth_image) == 0:
+            continue
         max_value = Depth_image.max()
         Depth_image = Depth_image / max_value * 255
         Depth_image = cv2.resize(Depth_image, (416, 416))
+        kin_name = './realtime/kin_image.jpg'
+        cv2.imwrite(kin_name, Depth_image)
+        Depth_image = cv2.imread(kin_name)
         # mmWave Dataloader
-        readItem, itemNum, lostPacketFlag = a.getFrame()
+        readItem, _, _ = a.getFrame()
         if len(readItem) == 14:
             continue
         mm_image = process(readItem)
@@ -130,14 +135,14 @@ def run(weights=ROOT / './runs/train/new_Cross1-0_yolov3-tiny/weights/best.pt', 
 
                 # Stream results
                 im0 = annotator.result()
-                im0 = np.concatenate((Depth_image, im0), axis=0)
                 # old_mtime = np.genfromtxt(source + 'timestamp.txt', dtype=str)
                 f = open(source + 'timestamp.txt')
                 old_mtime = f.readline()
                 f.close()
                 while(1):
-                    cv2.imshow(str(p), im0)
-                    cv2.waitKey(1)  # 1 millisecond
+                    results = np.hstack([im0, Depth_image])
+                    cv2.imshow(str(p), results)
+                    cv2.waitKey(100)  # 1 millisecond
                     # new_mtime = np.genfromtxt(source + 'timestamp.txt', dtype=str)
                     f = open(source + 'timestamp.txt')
                     new_mtime = f.readline()
