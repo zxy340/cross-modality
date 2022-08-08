@@ -139,7 +139,7 @@ def run(weights=ROOT / './runs/train/new_Cross1-0_yolov3-tiny/weights/best.pt', 
                 f = open(source + 'timestamp.txt')
                 old_mtime = f.readline()
                 f.close()
-                while(1):
+                while True:
                     results = np.hstack([im0, Depth_image])
                     cv2.imshow(str(p), results)
                     cv2.waitKey(100)  # 1 millisecond
