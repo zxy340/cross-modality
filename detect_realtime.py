@@ -20,7 +20,8 @@ from pathlib import Path
 import numpy as np
 import multiprocessing
 import time
-
+from mm_process import process
+from steaming import adcCapThread
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
@@ -60,28 +61,39 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
 
     # Load model
     device = select_device(device)
-    model = DetectMultiBackend(weights, device=device, dnn=dnn)
-    stride, names, pt, jit, onnx = model.stride, model.names, model.pt, model.jit, model.onnx
+    model_t = DetectMultiBackend(weights, device=device, dnn=dnn)
+    stride, names, pt, jit, onnx = model_t.stride, model_t.names, model_t.pt, model_t.jit, model_t.onnx
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
-    while(1):
+    # Open a thread for mmWave
+    a = adcCapThread(1, "adc")
+    a.start()
+
+    while True:
         t1 = time_sync()
-        # Dataloader
+        # mmWave Dataloader
+        readItem, itemNum, lostPacketFlag = a.getFrame()
+        mm_image = process(readItem)
+        # Kinect Dataloader
         typ = np.dtype((np.uint16, (424, 512)))
-        Depth_data = np.fromfile(source + 'Depdata.txt', dtype=typ)
-        Depth_data = Depth_data.squeeze()
-        max_value = Depth_data.max()
-        Depth_data = Depth_data / max_value * 255
-        Depth_data = cv2.resize(Depth_data, (416, 416))
-        name = './realtime/kinect.jpg'
-        cv2.imwrite(name, Depth_data)
+        Depth_image = np.fromfile(source + 'Depdata.txt', dtype=typ)
+        Depth_image = Depth_image.squeeze()
+        max_value = Depth_image.max()
+        Depth_image = Depth_image / max_value * 255
+        Depth_image = cv2.resize(Depth_image, (416, 416))
+        # Cat image
+        image = np.concatenate((Depth_image, mm_image), axis=0)
+        name = './realtime/image.jpg'
+        cv2.imwrite(name, image)
         dataset = LoadImages(name, img_size=imgsz, stride=stride, auto=pt and not jit)
 
         # Run inference
         if pt and device.type != 'cpu':
-            model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
+            model_t(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model_t.model.parameters())))  # warmup
         seen, count =0, 0
         for path, im, im0s, vid_cap, s in dataset:
+            cv2.imwrite('./realtime/im.jpg', im)
+            cv2.imwrite('./realtime/im0s.jpg', im0s)
             im = torch.from_numpy(im).to(device)
             im = im.half() if half else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
@@ -89,13 +101,13 @@ def run(weights=ROOT / './runs/train/new_Kinect_yolov3-tiny/weights/best.pt',  #
                 im = im[None]  # expand for batch dim
 
             # Inference
-            pred = model(im, augment=augment, visualize=visualize)
+            pred_t = model_t(im, augment=augment, visualize=visualize)
 
             # NMS
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
-            pred[0] = pred[0][torch.arange(pred[0].size(0))==0]
+            pred_t = non_max_suppression(pred_t, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            pred_t[0] = pred_t[0][torch.arange(pred_t[0].size(0))==0]
             # Process predictions
-            for i, det in enumerate(pred):  # per image
+            for i, det in enumerate(pred_t):  # per image
                 seen += 1
                 p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
