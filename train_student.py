@@ -211,10 +211,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
 
     nbs = 64  # nominal batch size
     # Optimizer
-    optimizer = optim.SGD(trainable_list.parameters(),
-                          lr=opt.learning_rate,
-                          momentum=opt.momentum,
-                          weight_decay=opt.weight_decay)
+    optimizer = Adam(trainable_list.parameters(), lr=opt.learning_rate)
     # ..............................................................
 
     # Scheduler
@@ -457,9 +454,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 loss = opt.cls * loss_cls + opt.beta * loss_kd
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
-                    #
                 if opt.quad:
-                    print('###################### FUCK %d'%WORLD_SIZE)
                     loss *= 4.
 
             # Backward
