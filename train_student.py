@@ -128,7 +128,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
 
     # .....................Cross-modality teacher model loading.................................
-    teacher_path = './runs/train/sig_Kinect_yolov3-tiny/weights/best.pt'
+    teacher_path = './runs/train/new_Kinect_yolov3-tiny/weights/best.pt'
     LOGGER.info(f'Load the teacher model from {teacher_path}')
     ckpt_t = torch.load(teacher_path, map_location=device)  # load checkpoint
     model_t = Model(cfg or ckpt_t['model'].yaml, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
@@ -315,7 +315,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
         results, _, _ = val.run(data_dict,
                                 batch_size=batch_size // WORLD_SIZE * 2,
                                 imgsz=imgsz,
-                                model=model_t,
+                                model=attempt_load(teacher_path[2:], device).half(),
                                 iou_thres=0.60,
                                 single_cls=single_cls,
                                 dataloader=val_loader,
@@ -445,7 +445,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                     if not freeze:
                         for feat_idx in range(len(model_simkd)):
                             trans_feat_s, trans_feat_t = model_simkd[feat_idx](feat_s[feat_idx], feat_t[feat_idx])
-                            loss_kd = loss_kd + criterion_kd(trans_feat_s, trans_feat_t)
+                            loss_kd = loss_kd + criterion_kd(trans_feat_s, trans_feat_t.detach())
                     else:
                         trans_feat_s, trans_feat_t = model_simkd[0](feat_s[freeze - 1], feat_t[freeze - 1])
                         loss_kd = loss_kd + criterion_kd(trans_feat_s, trans_feat_t)
@@ -457,7 +457,9 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 loss = opt.cls * loss_cls + opt.beta * loss_kd
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                    #
                 if opt.quad:
+                    print('###################### FUCK %d'%WORLD_SIZE)
                     loss *= 4.
 
             # Backward
@@ -523,6 +525,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
                 # Save last, best and delete
                 torch.save(ckpt, last)
                 if best_fitness == fi:
+                    print('The best model is from {} epoch!'.format(epoch))
                     torch.save(ckpt, best)
                 if (epoch > 0) and (opt.save_period > 0) and (epoch % opt.save_period == 0):
                     torch.save(ckpt, w / f'epoch{epoch}.pt')
@@ -551,6 +554,7 @@ def train(hyp,  # path/to/hyp.yaml or hyp dictionary
             if f.exists():
                 strip_optimizer(f)  # strip optimizers
                 if f is best:
+                    print(f)
                     LOGGER.info(f'\nValidating {f}...')
                     results, _, _ = val.run(data_dict,
                                             batch_size=batch_size // WORLD_SIZE * 2,

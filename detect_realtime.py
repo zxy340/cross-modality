@@ -41,7 +41,7 @@ from utils.torch_utils import select_device, time_sync
 
 
 @torch.no_grad()
-def run(weights=ROOT / './runs/train/new_Cross1-0_yolov3-tiny/weights/best.pt',  # model.pt path(s)
+def run(weights=ROOT / './runs/train/Cross1-1_yolov3-tiny/weights/best.pt',  # model.pt path(s)
         source='../hand/hand/data/realtime/',  # file/dir/URL/glob, 0 for webcam
         imgsz=416,  # inference size (pixels)
         conf_thres=0.25,  # confidence threshold
@@ -66,28 +66,37 @@ def run(weights=ROOT / './runs/train/new_Cross1-0_yolov3-tiny/weights/best.pt', 
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Open a thread for mmWave
-    a = adcCapThread(1, "adc")
-    a.start()
+    # a = adcCapThread(1, "adc")
+    # a.start()
 
     while True:
         t1 = time_sync()
         # Kinect Dataloader
-        typ = np.dtype((np.uint16, (424, 512)))
-        Depth_image = np.fromfile(source + 'Depdata.txt', dtype=typ)
-        Depth_image = Depth_image.squeeze()
-        if len(Depth_image) == 0:
-            continue
-        max_value = Depth_image.max()
-        Depth_image = Depth_image / max_value * 255
-        Depth_image = cv2.resize(Depth_image, (416, 416))
+        # typ = np.dtype((np.uint16, (424, 512)))
+        # Depth_image = np.fromfile(source + 'Depdata.txt', dtype=typ)
+        # Depth_image = Depth_image.squeeze()
+        # if len(Depth_image) == 0:
+        #     continue
+        # max_value = Depth_image.max()
+        # Depth_image = Depth_image / max_value * 255
+        # Depth_image = cv2.resize(Depth_image, (416, 416))
         kin_name = './realtime/kin_image.jpg'
-        cv2.imwrite(kin_name, Depth_image)
+        # cv2.imwrite(kin_name, Depth_image)
         Depth_image = cv2.imread(kin_name)
         # mmWave Dataloader
-        readItem, _, _ = a.getFrame()
-        if len(readItem) == 14:
-            continue
+        # readItem, _, _ = a.getFrame()
+        # if len(readItem) == 14:
+        #     continue
+        frame = 1500
+        x0 = np.fromfile('./realtime/adc_data_Raw_0.bin', dtype=np.int16)
+        x1 = np.fromfile('./realtime/adc_data_Raw_1.bin', dtype=np.int16)
+        x2 = np.fromfile('./realtime/adc_data_Raw_2.bin', dtype=np.int16)
+        x = np.concatenate((x0, x1, x2), axis=0)
+        x = x.reshape((frame, -1))
+        readItem = process(x[200])
+        t2 = time_sync()
         mm_image = process(readItem)
+        t3 = time_sync()
         name = './realtime/mm_image.jpg'
         cv2.imwrite(name, mm_image)
         dataset = LoadImages(name, img_size=imgsz, stride=stride, auto=pt and not jit)
@@ -136,21 +145,24 @@ def run(weights=ROOT / './runs/train/new_Cross1-0_yolov3-tiny/weights/best.pt', 
                 # Stream results
                 im0 = annotator.result()
                 # old_mtime = np.genfromtxt(source + 'timestamp.txt', dtype=str)
-                f = open(source + 'timestamp.txt')
-                old_mtime = f.readline()
-                f.close()
-                while True:
-                    results = np.hstack([im0, Depth_image])
-                    cv2.imshow(str(p), results)
-                    cv2.waitKey(100)  # 1 millisecond
+                # f = open(source + 'timestamp.txt')
+                # old_mtime = f.readline()
+                # f.close()
+                # while True:
+                results = np.hstack([im0, Depth_image])
+                
+                cv2.imshow(str(p), results)
+                cv2.waitKey(1)  # 1 millisecond
                     # new_mtime = np.genfromtxt(source + 'timestamp.txt', dtype=str)
-                    f = open(source + 'timestamp.txt')
-                    new_mtime = f.readline()
-                    f.close()
-                    if new_mtime != old_mtime:
-                        break
-        t2 = time_sync()
-        LOGGER.info(f'Done. ({t2 - t1:.3f}s)')
+                    # f = open(source + 'timestamp.txt')
+                    # new_mtime = f.readline()
+                    # f.close()
+                    # if new_mtime != old_mtime:
+                    #     break
+        t4 = time_sync()
+        LOGGER.info(f'(load data)Done. ({t2 - t1:.3f}s)')
+        LOGGER.info(f'(process mmWave data)Done. ({t3 - t2:.3f}s)')
+        LOGGER.info(f'(model prediction)Done. ({t4 - t3:.3f}s)')
 
 def main():
     run()

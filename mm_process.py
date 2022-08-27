@@ -4,6 +4,7 @@ import os
 import time
 import matplotlib.pyplot as plt
 import torch.nn as nn
+from utils.torch_utils import time_sync
 
 sample_num = 256  # Sample Length
 chirp_num = 128  # Chirp Total
@@ -69,31 +70,31 @@ def angleFFT(AOAInput, padding_azimuth, padding_elevation, numRxAntennas):
     return x_vector, y_vector, z_vector
 
 def process(readItem):
-    readItem = np.uint16(readItem)
-    readItem = readItem.reshape(chirp_num, Txchannel_num, Rxchannel_num, -1, 4)  # 2I + 2Q = 4
-    x_I = readItem[:, :, :, :, :2].reshape(chirp_num, Txchannel_num, Rxchannel_num, -1)  # flatten the last two dims of I data
-    x_Q = readItem[:, :, :, :, 2:].reshape(chirp_num, Txchannel_num, Rxchannel_num, -1)  # flatten the last two dims of Q data
-    data = np.array((x_I, x_Q))  # data[I/Q, Chirp, TxChannel, RxChannel, Sample]
-    data = np.transpose(data, (0, 2, 3, 1, 4))  # data[I/Q, TxChannel, RxChannel, Chirp, Sample]
-    sigReceive = np.zeros((Txchannel_num, Rxchannel_num, chirp_num, sample_num), dtype=complex)
-    for Txchannel in range(Txchannel_num):
-        for Rxchannel in range(Rxchannel_num):
-            for chirp in range(chirp_num):
-                for sample in range(sample_num):
-                    sigReceive[Txchannel, Rxchannel, chirp, sample] = complex(0, 1) * data[
-                        0, Txchannel, Rxchannel, chirp, sample] + data[1, Txchannel, Rxchannel, chirp, sample]
-    frameWithChirp = np.reshape(sigReceive, (Txchannel_num, Rxchannel_num, chirp_num, -1))
-    frameWithChirp = np.flip(frameWithChirp, 3)
+    readItem = readItem.reshape(chirp_num, Txchannel_num, Rxchannel_num, -1, 4)  # 2I + 2Q = 4   0.0s
+    x_Q = readItem[:, :, :, :, :2].reshape(chirp_num, Txchannel_num, Rxchannel_num, -1)  # flatten the last two dims of Q data    0.002s
+    x_I = readItem[:, :, :, :, 2:].reshape(chirp_num, Txchannel_num, Rxchannel_num, -1)  # flatten the last two dims of I data    0.002s
+    data = np.array((x_Q, x_I))  # data[I/Q, Chirp, TxChannel, RxChannel, Sample]    0.001s
+    data = np.transpose(data, (0, 2, 3, 1, 4))  # data[I/Q, TxChannel, RxChannel, Chirp, Sample]      0.0s
+    frameWithChirp = data[0] + complex(0, 1) * data[1]  # frameWithChirp[TxChannel, RxChannel, Chirp, Sample]      0.01s
+    # frameWithChirp = np.flip(frameWithChirp, 3)  # 0.0s
+    rotation = np.array([0, -np.pi, -np.pi, 0])
+    frameWithChirp = np.fft.ifft(np.transpose(np.transpose(np.fft.fft(frameWithChirp), (0, 3, 2, 1)) * np.exp(1j * rotation), (0, 3, 2, 1)))
     # get 1D range profile->rangeFFT
-    rangeFFTResult = rangeFFT(frameWithChirp, sample_num)
-    rangeFFTResult = clutter_removal(rangeFFTResult, axis=2)
+    rangeFFTResult = rangeFFT(frameWithChirp, sample_num)  # 0.01s
+    plt.figure()
+    plt.imshow(abs(rangeFFTResult[0][0]))
+    plt.savefig('./realtime/range.jpg')
+    rangeFFTResult = clutter_removal(rangeFFTResult, axis=2)  # 0.005s
+    plt.imshow(abs(rangeFFTResult[0][0]))
+    plt.savefig('./realtime/clutter.jpg')
     # get 2D range-velocity profile->dopplerFFT
-    dopplerFFTResult = dopplerFFT(rangeFFTResult, chirp_num)
+    dopplerFFTResult = dopplerFFT(rangeFFTResult, chirp_num)  # 0.02s
     # get 2D range-angle profile->angleFFT
-    dopplerFFTResult = dopplerFFTResult[:, :, 40:89, :50]  # eliminate signal with high velocity and distance
-    AOAInput = dopplerFFTResult.reshape(-1, len(dopplerFFTResult[0][0]), len(dopplerFFTResult[0][0][0]))
-    x_vector, y_vector, z_vector = angleFFT(AOAInput, padding_azimuth, padding_elevation, Rxchannel_num)
+    dopplerFFTResult = dopplerFFTResult[:, :, 40:89, :50]  # eliminate signal with high velocity and distance  0.0s
+    AOAInput = dopplerFFTResult.reshape(-1, len(dopplerFFTResult[0][0]), len(dopplerFFTResult[0][0][0]))   # 0.0s
+    x_vector, y_vector, z_vector = angleFFT(AOAInput, padding_azimuth, padding_elevation, Rxchannel_num)  # 0.02s
 
+    # 0.02s
     size = 32
     image = np.zeros((size, size)).astype(float)
     resolution = 0.133
@@ -109,4 +110,5 @@ def process(readItem):
     max_value = np.ceil(image.max())
     image = image / max_value * 256
     image = cv2.resize(image, (416, 416))
+
     return image
