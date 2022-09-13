@@ -1,4 +1,4 @@
-# YOLOv3 🚀 by Ultralytics, GPL-3.0 license
+# YOLOv3 ?? by Ultralytics, GPL-3.0 license
 """
 Train a  model on a custom dataset
 
