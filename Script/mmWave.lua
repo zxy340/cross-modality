@@ -1,23 +1,23 @@
 NUM_TX = 3
 NUM_RX = 4
 
-
+-- 2359296000
 START_FREQ = 60 
-ADC_START_TIME = 6 
-FREQ_SLOPE = 60.012
+ADC_START_TIME = 0 
+FREQ_SLOPE = 30.018
 ADC_SAMPLES = 256
-SAMPLE_RATE = 4400
+SAMPLE_RATE = 2000
 RX_GAIN = 30 
 
-IDLE_TIME = 7
-RAMP_END_TIME = 65
+IDLE_TIME = 22
+RAMP_END_TIME = 128
 CHIRP_LOOPS = 128
 --PERIODICITY = 100 
 
 autoStart = 1
 NumOfProfile = 1
 NumOfChirpInLoop = 3
-NumOfFrame = 100
+NumOfFrame = 500
 profile={}
 profile[0]={0, START_FREQ, IDLE_TIME, ADC_START_TIME, RAMP_END_TIME, 0, 0, 0, 0, 0, 0, FREQ_SLOPE, 0, ADC_SAMPLES, SAMPLE_RATE, 0, 0, RX_GAIN}
 profile[1]={0, START_FREQ, IDLE_TIME, ADC_START_TIME, RAMP_END_TIME, 0, 0, 0, 0, 0, 0, FREQ_SLOPE, 0, ADC_SAMPLES, SAMPLE_RATE, 0, 0, RX_GAIN}
@@ -27,7 +27,7 @@ ptx = {}
 ptx[1]={1,0,0}
 ptx[2]={0,0,1}
 ptx[3]={0,1,0}
-periodicity = 100
+periodicity = 60
 
 info = debug.getinfo(1,'S');
 file_path = (info.source);
